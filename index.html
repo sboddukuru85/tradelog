@@ -101,6 +101,10 @@
     <span class="logo-text">TradeLog</span>
     <span class="logo-sub">PRO JOURNAL</span>
   </div>
+  <div style="display:flex;align-items:center;gap:20px">
+    <span id="sync-status" style="font-size:11px;color:#555;letter-spacing:0.06em">Connecting...</span>
+    <button class="btn-sm btn-secondary" onclick="showSyncInfo()" title="Sync info" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#555;cursor:pointer">Device ID</button>
+  </div>
   <div class="nav">
     <button class="nav-btn active" onclick="showPage('dashboard')">Dashboard</button>
     <button class="nav-btn" onclick="showPage('add')">Log Trade</button>
@@ -353,26 +357,106 @@
 </div>
 
 <script>
+/* ---- SUPABASE CONFIG ---- */
+const SUPABASE_URL = 'https://pqgqneuautnopbrqdgch.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxZ3FuZXVhdXRub3BicnFkZ2NoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAxMDU0MTEsImV4cCI6MjA5NTY4MTQxMX0.oXwRsTCqC8CiSwNBYrajR2yK1aOZyJhNpNT1lKR7sI8';
+const TABLE = 'trades';
 const STORAGE_KEY = 'tradelog_pro_v2';
+const USER_ID = (()=>{ let id=localStorage.getItem('tl_uid'); if(!id){id='u_'+Math.random().toString(36).slice(2,10); localStorage.setItem('tl_uid',id);} return id; })();
+
 let trades = [];
 let editId = null;
+let syncing = false;
 
-/* ---- STORAGE ---- */
-function load() {
+function sbHeaders() {
+  return {
+    'Content-Type': 'application/json',
+    'apikey': SUPABASE_KEY,
+    'Authorization': 'Bearer ' + SUPABASE_KEY,
+    'Prefer': 'return=representation'
+  };
+}
+
+/* ---- SYNC STATUS ---- */
+function setSyncStatus(msg, color) {
+  const el = document.getElementById('sync-status');
+  if (el) { el.textContent = msg; el.style.color = color || '#555'; }
+}
+
+/* ---- LOAD FROM SUPABASE ---- */
+async function load() {
+  // Always load local first so app works offline
   try { trades = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { trades = []; }
-  // Normalise any dates stored in non-ISO format
+  normaliseDates();
+  setSyncStatus('Syncing...', '#f5a623');
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}?user_id=eq.${USER_ID}&order=date.desc`, {
+      headers: sbHeaders()
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const remote = await res.json();
+    if (Array.isArray(remote) && remote.length > 0) {
+      trades = remote.map(r => ({
+        id: r.id, date: r.date, time: r.time, asset: r.asset, ticker: r.ticker,
+        contract: r.contract||'', leg1: r.leg1||'', leg2: r.leg2||'',
+        strategy: r.strategy, direction: r.direction,
+        qty: r.qty, entry: r.entry, exit: r.exit,
+        fees: r.fees||0, stop: r.stop||0,
+        setup: r.setup, emotion: r.emotion, notes: r.notes||''
+      }));
+      normaliseDates();
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
+    }
+    setSyncStatus('● Synced', '#00c48c');
+  } catch(e) {
+    setSyncStatus('● Offline', '#ff4d6d');
+    console.warn('Supabase load failed, using local:', e);
+  }
+}
+
+/* ---- SAVE TO SUPABASE ---- */
+async function save() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
+}
+
+async function syncTrade(trade) {
+  const payload = { ...trade, user_id: USER_ID };
+  try {
+    setSyncStatus('Saving...', '#f5a623');
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}`, {
+      method: 'POST',
+      headers: { ...sbHeaders(), 'Prefer': 'resolution=merge-duplicates,return=representation' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + await res.text());
+    setSyncStatus('● Synced', '#00c48c');
+  } catch(e) {
+    setSyncStatus('● Saved locally', '#f5a623');
+    console.warn('Supabase save failed:', e);
+  }
+}
+
+async function deleteSyncTrade(id) {
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}?id=eq.${id}&user_id=eq.${USER_ID}`, {
+      method: 'DELETE',
+      headers: sbHeaders()
+    });
+    setSyncStatus('● Synced', '#00c48c');
+  } catch(e) {
+    setSyncStatus('● Offline', '#f5a623');
+  }
+}
+
+/* ---- DATE NORMALISE ---- */
+function normaliseDates() {
   trades.forEach(t => {
     if (t.date && t.date.includes('/')) {
       const parts = t.date.split('/');
-      if (parts.length === 3) {
-        // MM/DD/YYYY -> YYYY-MM-DD
+      if (parts.length === 3)
         t.date = parts[2] + '-' + parts[0].padStart(2,'0') + '-' + parts[1].padStart(2,'0');
-      }
     }
   });
-}
-function save() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
 }
 
 /* ---- HELPERS ---- */
@@ -602,6 +686,7 @@ function saveTrade() {
     trades.unshift(trade);
   }
   save();
+  syncTrade(trade);
 
   const msg = document.getElementById('saved-msg');
   msg.classList.add('show');
@@ -651,6 +736,7 @@ function deleteTrade(id) {
   if (!confirm('Delete this trade?')) return;
   trades = trades.filter(t => t.id !== id);
   save();
+  deleteSyncTrade(id);
   renderLog();
   renderDash();
 }
@@ -891,6 +977,8 @@ function importCSV(e) {
     if (confirm(`Import ${imported.length} trades? They will be added to existing trades.`)) {
       trades = [...trades, ...imported];
       save(); renderLog(); renderDash();
+      setSyncStatus('Syncing ' + imported.length + ' trades...', '#f5a623');
+      importAndSync(imported).then(() => setSyncStatus('● Synced', '#00c48c'));
       alert(`Imported ${imported.length} trades successfully.`);
     }
   };
@@ -1137,9 +1225,25 @@ function drawMetricsChart(keys, groups) {
   }
 }
 
+/* ---- SYNC INFO ---- */
+function showSyncInfo() {
+  alert('Your Device ID: ' + USER_ID + '\n\nThis ID links your trades to the cloud. It is stored in this browser automatically. All devices using this ID share the same trades.\n\nTo sync a new device, open the app on that device — trades will load from the cloud automatically.');
+}
+
+/* ---- IMPORT with cloud sync ---- */
+async function importAndSync(importedTrades) {
+  for (const t of importedTrades) {
+    await syncTrade(t);
+  }
+}
+
 // Init
-load();
-renderDash();
+(async () => {
+  await load();
+  renderDash();
+  renderMetrics();
+  renderLog();
+})();
 resetForm();
 </script>
 </body>
