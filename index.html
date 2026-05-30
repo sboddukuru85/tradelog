@@ -121,8 +121,9 @@
     <span class="logo-text">TradeLog</span>
     <span class="logo-sub">PRO JOURNAL</span>
   </div>
-  <div style="display:flex;align-items:center;gap:12px">
+  <div style="display:flex;align-items:center;gap:10px">
     <span id="sync-status" style="font-size:11px;color:#555;letter-spacing:0.06em">Connecting...</span>
+    <button onclick="forceRefresh()" title="Refresh trades from cloud" style="font-size:13px;padding:3px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.08);background:transparent;color:#444;cursor:pointer;font-family:'DM Mono',monospace" id="refresh-btn">↻</button>
     <span id="header-username" style="font-size:11px;color:#444;letter-spacing:0.04em"></span>
     <button onclick="showLoginModal()" title="Switch account" style="font-size:11px;padding:4px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#555;cursor:pointer;font-family:'DM Mono',monospace" id="login-btn">Sign In</button>
   </div>
@@ -454,10 +455,7 @@ function setSyncStatus(msg, color) {
 
 /* ---- LOAD FROM SUPABASE ---- */
 async function load() {
-  if (!USER_ID) { setSyncStatus('Not signed in', '#555'); return; }
-  // Always load local first so app works offline
-  try { trades = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { trades = []; }
-  normaliseDates();
+  if (!USER_ID) { setSyncStatus('Not signed in', '#555'); trades = []; return; }
   setSyncStatus('Syncing...', '#f5a623');
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}?user_id=eq.${USER_ID}&order=date.desc`, {
@@ -465,22 +463,25 @@ async function load() {
     });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const remote = await res.json();
-    if (Array.isArray(remote) && remote.length > 0) {
-      trades = remote.map(r => ({
-        id: r.id, date: r.date, time: r.time, asset: r.asset, ticker: r.ticker,
-        contract: r.contract||'', leg1: r.leg1||'', leg2: r.leg2||'',
-        strategy: r.strategy, direction: r.direction,
-        qty: r.qty, entry: r.entry, exit: r.exit,
-        fees: r.fees||0, stop: r.stop||0,
-        setup: r.setup, emotion: r.emotion, notes: r.notes||''
-      }));
-      normaliseDates();
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
-    }
+    // Supabase is ALWAYS the source of truth — replace local completely
+    trades = Array.isArray(remote) ? remote.map(r => ({
+      id: r.id, date: r.date, time: r.time, asset: r.asset, ticker: r.ticker,
+      contract: r.contract||'', leg1: r.leg1||'', leg2: r.leg2||'',
+      strategy: r.strategy, direction: r.direction,
+      qty: r.qty, entry: r.entry, exit: r.exit,
+      fees: r.fees||0, stop: r.stop||0,
+      setup: r.setup, emotion: r.emotion, notes: r.notes||''
+    })) : [];
+    normaliseDates();
+    // Overwrite local cache with authoritative server state
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(trades));
     setSyncStatus('● Synced', '#00c48c');
   } catch(e) {
-    setSyncStatus('● Offline', '#ff4d6d');
+    // Only fall back to local cache if server is unreachable
+    setSyncStatus('● Offline — using local data', '#ff4d6d');
     console.warn('Supabase load failed, using local:', e);
+    try { trades = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { trades = []; }
+    normaliseDates();
   }
 }
 
@@ -507,14 +508,17 @@ async function syncTrade(trade) {
 }
 
 async function deleteSyncTrade(id) {
+  setSyncStatus('Deleting...', '#f5a623');
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}?id=eq.${id}&user_id=eq.${USER_ID}`, {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${TABLE}?id=eq.${id}&user_id=eq.${USER_ID}`, {
       method: 'DELETE',
-      headers: sbHeaders()
+      headers: { ...sbHeaders(), 'Prefer': 'return=representation' }
     });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     setSyncStatus('● Synced', '#00c48c');
   } catch(e) {
-    setSyncStatus('● Offline', '#f5a623');
+    setSyncStatus('● Delete failed — try again', '#ff4d6d');
+    console.warn('Supabase delete failed:', e);
   }
 }
 
@@ -1300,6 +1304,17 @@ function showSyncInfo() {
   showLoginModal();
 }
 
+/* ---- FORCE REFRESH FROM CLOUD ---- */
+async function forceRefresh() {
+  const btn = document.getElementById('refresh-btn');
+  if (btn) { btn.style.opacity = '0.4'; btn.style.pointerEvents = 'none'; }
+  await load();
+  renderDash();
+  renderLog();
+  renderMetrics();
+  if (btn) { btn.style.opacity = '1'; btn.style.pointerEvents = 'auto'; }
+}
+
 /* ---- IMPORT with cloud sync ---- */
 async function importAndSync(importedTrades) {
   for (const t of importedTrades) {
@@ -1322,6 +1337,15 @@ if (!USER_ID) {
   })();
   resetForm();
 }
+
+// Auto-refresh from cloud every 30 seconds to catch changes from other devices
+setInterval(async () => {
+  if (!USER_ID) return;
+  await load();
+  renderDash();
+  renderLog();
+  renderMetrics();
+}, 30000);
 </script>
 </body>
 </html>
