@@ -1,0 +1,2 @@
+# tradelog
+sboddukuru trade log
