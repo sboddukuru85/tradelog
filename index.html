@@ -95,15 +95,36 @@
 </head>
 <body>
 
+
+<!-- LOGIN MODAL -->
+<div id="login-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:1000;align-items:center;justify-content:center">
+  <div style="background:#141820;border:1px solid #2a3147;border-radius:14px;padding:32px;width:360px;max-width:90vw;font-family:'DM Mono',monospace">
+    <div style="font-family:'Syne',sans-serif;font-size:20px;font-weight:700;color:#fff;margin-bottom:6px">Welcome to TradeLog</div>
+    <div style="font-size:12px;color:#444;margin-bottom:24px;line-height:1.6">Enter your username to access your trades from any device. Use the same username on all your devices.</div>
+
+    <div style="font-size:11px;color:#555;letter-spacing:0.1em;text-transform:uppercase;margin-bottom:6px">Username</div>
+    <input id="login-username" type="text" placeholder="e.g. john_trader"
+      style="width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:11px 14px;color:#e8e8e8;font-size:14px;outline:none;font-family:'DM Mono',monospace;margin-bottom:8px"
+      onkeydown="if(event.key==='Enter') doLogin()">
+    <div style="font-size:11px;color:#333;margin-bottom:20px">Letters, numbers and _ only. Min 3 characters.</div>
+
+    <button onclick="doLogin()" style="width:100%;background:rgba(0,196,140,0.15);border:1px solid rgba(0,196,140,0.35);color:#00c48c;border-radius:10px;padding:12px;font-size:14px;cursor:pointer;font-family:'DM Mono',monospace;margin-bottom:10px">
+      Enter TradeLog →
+    </button>
+    <div id="login-err" style="font-size:12px;color:#ff4d6d;text-align:center;display:none"></div>
+  </div>
+</div>
+
 <div class="header">
   <div class="logo">
     <div class="dot"></div>
     <span class="logo-text">TradeLog</span>
     <span class="logo-sub">PRO JOURNAL</span>
   </div>
-  <div style="display:flex;align-items:center;gap:20px">
+  <div style="display:flex;align-items:center;gap:12px">
     <span id="sync-status" style="font-size:11px;color:#555;letter-spacing:0.06em">Connecting...</span>
-    <button class="btn-sm btn-secondary" onclick="showSyncInfo()" title="Sync info" style="font-size:11px;padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#555;cursor:pointer">Device ID</button>
+    <span id="header-username" style="font-size:11px;color:#444;letter-spacing:0.04em"></span>
+    <button onclick="showLoginModal()" title="Switch account" style="font-size:11px;padding:4px 12px;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#555;cursor:pointer;font-family:'DM Mono',monospace" id="login-btn">Sign In</button>
   </div>
   <div class="nav">
     <button class="nav-btn active" onclick="showPage('dashboard')">Dashboard</button>
@@ -362,11 +383,59 @@ const SUPABASE_URL = 'https://pqgqneuautnopbrqdgch.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBxZ3FuZXVhdXRub3BicnFkZ2NoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAxMDU0MTEsImV4cCI6MjA5NTY4MTQxMX0.oXwRsTCqC8CiSwNBYrajR2yK1aOZyJhNpNT1lKR7sI8';
 const TABLE = 'trades';
 const STORAGE_KEY = 'tradelog_pro_v2';
-const USER_ID = (()=>{ let id=localStorage.getItem('tl_uid'); if(!id){id='u_'+Math.random().toString(36).slice(2,10); localStorage.setItem('tl_uid',id);} return id; })();
+let USER_ID = localStorage.getItem('tl_uid') || null;
+let USERNAME = localStorage.getItem('tl_username') || null;
 
 let trades = [];
 let editId = null;
 let syncing = false;
+
+/* ---- LOGIN ---- */
+function showLoginModal() {
+  document.getElementById('login-overlay').style.display = 'flex';
+  document.getElementById('login-username').value = USERNAME || '';
+  document.getElementById('login-err').style.display = 'none';
+  setTimeout(() => document.getElementById('login-username').focus(), 100);
+}
+
+function hideLoginModal() {
+  document.getElementById('login-overlay').style.display = 'none';
+}
+
+function doLogin() {
+  const raw = document.getElementById('login-username').value.trim().toLowerCase();
+  const errEl = document.getElementById('login-err');
+  if (!raw || raw.length < 3 || !/^[a-z0-9_]+$/.test(raw)) {
+    errEl.textContent = 'Username must be 3+ characters, letters/numbers/_ only.';
+    errEl.style.display = 'block';
+    return;
+  }
+  USERNAME = raw;
+  USER_ID  = 'u_' + raw;
+  localStorage.setItem('tl_username', USERNAME);
+  localStorage.setItem('tl_uid', USER_ID);
+  hideLoginModal();
+  updateHeaderUser();
+  // Reload trades for this user
+  (async () => {
+    await load();
+    renderDash();
+    renderLog();
+    renderMetrics();
+  })();
+}
+
+function updateHeaderUser() {
+  const el = document.getElementById('header-username');
+  const btn = document.getElementById('login-btn');
+  if (USERNAME) {
+    if (el) el.textContent = '● ' + USERNAME;
+    if (btn) btn.textContent = 'Switch';
+  } else {
+    if (el) el.textContent = '';
+    if (btn) btn.textContent = 'Sign In';
+  }
+}
 
 function sbHeaders() {
   return {
@@ -385,6 +454,7 @@ function setSyncStatus(msg, color) {
 
 /* ---- LOAD FROM SUPABASE ---- */
 async function load() {
+  if (!USER_ID) { setSyncStatus('Not signed in', '#555'); return; }
   // Always load local first so app works offline
   try { trades = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); } catch { trades = []; }
   normaliseDates();
@@ -1227,7 +1297,7 @@ function drawMetricsChart(keys, groups) {
 
 /* ---- SYNC INFO ---- */
 function showSyncInfo() {
-  alert('Your Device ID: ' + USER_ID + '\n\nThis ID links your trades to the cloud. It is stored in this browser automatically. All devices using this ID share the same trades.\n\nTo sync a new device, open the app on that device — trades will load from the cloud automatically.');
+  showLoginModal();
 }
 
 /* ---- IMPORT with cloud sync ---- */
@@ -1238,13 +1308,20 @@ async function importAndSync(importedTrades) {
 }
 
 // Init
-(async () => {
-  await load();
+updateHeaderUser();
+if (!USER_ID) {
+  showLoginModal();
   renderDash();
-  renderMetrics();
-  renderLog();
-})();
-resetForm();
+  resetForm();
+} else {
+  (async () => {
+    await load();
+    renderDash();
+    renderMetrics();
+    renderLog();
+  })();
+  resetForm();
+}
 </script>
 </body>
 </html>
